@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/bin/nnUNetv2_train", line 8, in <module>
+    sys.exit(run_training_entry())
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/run/run_training.py", line 275, in run_training_entry
+    run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/run/run_training.py", line 196, in run_training
+    nnunet_trainer = get_trainer_from_args(dataset_name_or_id, configuration, fold, trainer_class_name,
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/run/run_training.py", line 64, in get_trainer_from_args
+    plans = load_json(plans_file)
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/utilities/file_and_folder_operations.py", line 103, in load_json
+    with open(file, 'r') as f:
+         ^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/cconelea/shared/projects/316_CBIT/BIDS_output/code/SMA_labeller/data/nnUNet/nnunet_v2/nnUNet_preprocessed/Dataset503_MICCAI2012_and_316_CBIT_SMA_GM_ribbon/nnUNetPlans.json'
+slurmstepd: error: *** JOB 31854954 ON aga32 CANCELLED AT 2025-02-18T15:41:44 ***

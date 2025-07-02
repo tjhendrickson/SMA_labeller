@@ -1,0 +1,201 @@
+import pdb
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import BatchNorm3d
+from torch.nn.functional import leaky_relu
+
+from torch.utils.data import Dataset
+import os
+from glob import glob
+import nibabel as nib
+import numpy as np
+import diskcache as dc
+
+device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+home_dir = os.path.expanduser('~')
+
+def center_crop(in_tensor, target_size):
+    _, _, h, w, d = in_tensor.size()
+    _, _, th, tw, td = target_size.size()
+    x1 = (h - th) // 2
+    y1 = (w - tw) // 2
+    z1 = (d - td) // 2
+    return in_tensor[:, :, x1:x1+th, y1:y1+tw, z1:z1+td]
+
+
+def pad_to_match(in_tensor, target_size):
+    _, _, h, w, d = in_tensor.size()
+    _, _, th, tw, td = target_size.size()
+    diffX = th - h
+    diffY = tw - w
+    diffZ = td - d
+    return F.pad(in_tensor, [diffX // 2, diffX - diffX // 2,
+                          diffY // 2, diffY - diffY // 2,
+                          diffZ // 2, diffZ - diffZ // 2])
+
+class DiceLoss(nn.Module):
+    def forward(self, inputs, targets, smooth=1):
+        inputs = torch.sigmoid(inputs)
+        intersection = (inputs * targets).sum()
+        dice = (2.*intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
+        return 1 - dice
+
+
+class CustomMRIImageDataset(Dataset):
+    nib.Nifti1Header.quaternion_threshold = -1e-06
+    def __init__(self,annotations_dir,img_dir,augmentations=None,cache_dir=os.path.join(home_dir,'.mri_cache')):
+        self.annotations_dir = annotations_dir
+        self.img_dir = img_dir
+        self.augmentations = augmentations
+        self.cache = dc.Cache(cache_dir)
+
+    def __len__(self):
+        files = [f for f in os.listdir(self.annotations_dir)  if os.path.isfile(os.path.join(self.annotations_dir, f)) and '.nii' in f ]
+        return len(files)
+
+    def __getitem__(self,idx):
+        # image and label paths
+        label_images = sorted(glob(os.path.join(self.annotations_dir,'*.nii.gz')))
+        label_image_path = label_images[idx]
+        image_name = os.path.basename(label_image_path).split('.')[0]+'_0000.nii.gz'
+        image_path = os.path.join(self.img_dir,image_name)
+
+        # create cache keys
+        label_cache_key = f"mri_label_{os.path.basename(label_image_path)}"
+        image_cache_key = f"mri_image_{os.path.basename(image_path)}"
+
+        # try to load label from cache
+        if label_cache_key in self.cache:
+            label_data_tensor = self.cache[label_cache_key]
+        else:
+            # load label image
+            label_loaded = nib.load(label_image_path)
+            label_data_np = label_loaded.get_fdata(dtype='single')
+
+            # add channel dimension for 3d conv
+            label_data_np = np.expand_dims(label_data_np, axis=0)
+
+            # convert to pytorch tensor
+            label_data_tensor = torch.from_numpy(label_data_np)
+
+            # cache result
+            self.cache[label_cache_key] = label_data_tensor
+
+        # try to load image from cache
+        if image_cache_key in self.cache:
+            image_data_tensor = self.cache[image_cache_key]
+        else:
+            # load image
+            image_loaded = nib.load(image_path)
+            image_data_np = image_loaded.get_fdata(dtype='single')
+
+            # add channel dimension for 3d conv
+            image_data_np = np.expand_dims(image_data_np, axis=0)
+
+            # convert to pytorch tensor
+            image_data_tensor = torch.from_numpy(image_data_np)
+
+            # cache result
+            self.cache[image_cache_key] = image_data_tensor
+
+        #if self.augmentations:
+
+        return image_data_tensor, label_data_tensor
+
+class UNet3D(nn.Module):
+    def __init__(self,n_class):
+        super(UNet3D, self).__init__()
+
+        #Encoder
+
+        # each block of the encoder consists of two convolutional layers followed by a pooling layer
+
+        #input: 182x218x182x1
+        self.encode1layer1=nn.Conv3d(1,64,kernel_size=3,padding=1,stride=1) # output: 64,182,218,182
+        self.encode1layer2=nn.Conv3d(64,64,kernel_size=3,padding=1,stride=1) # output: 64,182,218,182
+        self.pool1 = nn.MaxPool3d(kernel_size=2,padding=1,stride=2) # output: 64,92,110,92
+
+        self.encode2layer1=nn.Conv3d(64,128,kernel_size=3,padding=1,stride=1) # output: 128,92,110,92
+        self.encode2layer2 = nn.Conv3d(128, 128, kernel_size=3, padding=1,stride=1,) # output: 128,92,110,92
+        self.pool2 = nn.MaxPool3d(kernel_size=2,padding=1,stride=2) # output: 128,47,56,47
+
+        self.encode3layer1=nn.Conv3d(128,256,kernel_size=3,padding=1,stride=1) # output: 256,47,56,47
+        self.encode3layer2=nn.Conv3d(256,256,kernel_size=3,padding=1,stride=1) # output: 256,47,56,47
+        self.pool3 = nn.MaxPool3d(kernel_size=2,stride=2,padding=1) # output: 256, 24, 29, 24
+
+        self.encode4layer1=nn.Conv3d(256,512,kernel_size=3,padding=1,stride=1) # output: 512, 24, 29, 24
+        self.encode4layer2=nn.Conv3d(512,512,kernel_size=3,padding=1,stride=1) # output: 512, 24, 29, 24
+
+        # Decoder
+        self.upconv1=nn.ConvTranspose3d(512,256,kernel_size=2,stride=2,padding=1) # output:  256, 46, 56, 46
+        self.decode1layer1=nn.Conv3d(512,256,kernel_size=3,stride=1,padding=1) # output:  256, 46, 56, 46
+        self.decode1layer2=nn.Conv3d(256,256,kernel_size=3,stride=1,padding=1) # output:  256, 46, 56, 46
+
+        self.upconv2=nn.ConvTranspose3d(256,128,kernel_size=2,stride=2,padding=1) # output: 128, 90, 110, 90
+        self.decode2layer1=nn.Conv3d(256,128,kernel_size=3,stride=1,padding=1) # output: 128, 90, 110, 90
+        self.decode2layer2=nn.Conv3d(128,128,kernel_size=3,stride=1,padding=1) # output: 128, 90, 110, 90
+
+        self.upconv3=nn.ConvTranspose3d(128,64,kernel_size=2,stride=2,padding=1) # output: 178, 218, 178
+        self.decode3layer1=nn.Conv3d(128,64,kernel_size=3,stride=1,padding=1) # output: 64, 178, 218, 178
+        self.decode3layer2 = nn.Conv3d(64, 64, kernel_size=3, stride=1, padding=1) # output:  64, 178, 218, 178
+
+        self.outconv = nn.Conv3d(64,n_class,kernel_size=1) # output: 1, 178, 218, 178
+
+    def forward(self,x):
+
+        # Encoder
+        BN_encode1layer1 = BatchNorm3d(self.encode1layer1.out_channels).to(device)
+        forward_encode1layer1= leaky_relu(BN_encode1layer1(self.encode1layer1(x)))
+        BN_encode1layer2 = BatchNorm3d(self.encode1layer2.out_channels).to(device)
+        forward_encode1layer2 = leaky_relu(BN_encode1layer2(self.encode1layer2(forward_encode1layer1)))
+        forward_pool1 = self.pool1(forward_encode1layer2)
+
+        BN_encode2layer1 = BatchNorm3d(self.encode2layer1.out_channels).to(device)
+        forward_encode2layer1 = leaky_relu(BN_encode2layer1(self.encode2layer1(forward_pool1)))
+        BN_encode2layer2 = BatchNorm3d(self.encode2layer2.out_channels).to(device)
+        forward_encode2layer2 = leaky_relu(BN_encode2layer2(self.encode2layer2(forward_encode2layer1)))
+        forward_pool2=self.pool2(forward_encode2layer2)
+
+        BN_encode3layer1 = BatchNorm3d(self.encode3layer1.out_channels).to(device)
+        forward_encode3layer1 = leaky_relu(BN_encode3layer1(self.encode3layer1(forward_pool2)))
+        BN_encode3layer2 = BatchNorm3d(self.encode3layer2.out_channels).to(device)
+        forward_encode3layer2 = leaky_relu(BN_encode3layer2(self.encode3layer2(forward_encode3layer1)))
+        forward_pool3=self.pool3(forward_encode3layer2)
+
+        BN_encode4layer1 = BatchNorm3d(self.encode4layer1.out_channels).to(device)
+        forward_encode4layer1 = leaky_relu(BN_encode4layer1(self.encode4layer1(forward_pool3)))
+        BN_encode4layer2 = BatchNorm3d(self.encode4layer2.out_channels).to(device)
+        forward_encode4layer2 = leaky_relu(BN_encode4layer2(self.encode4layer2(forward_encode4layer1)))
+
+        # Decoder
+        forward_upconv1=self.upconv1(forward_encode4layer2)
+        forward_encode3layer2_cropped = center_crop(forward_encode3layer2, forward_upconv1)
+        skipconnection1=torch.cat([forward_upconv1,forward_encode3layer2_cropped],dim=1)
+        BN_decode1layer1 = BatchNorm3d(self.decode1layer1.out_channels).to(device)
+        forward_decode1layer1=leaky_relu(BN_decode1layer1(self.decode1layer1(skipconnection1)))
+        BN_decode1layer2=BatchNorm3d(self.decode1layer2.out_channels).to(device)
+        forward_decode1layer2 = leaky_relu(BN_decode1layer2(self.decode1layer2(forward_decode1layer1)))
+
+        forward_upconv2=self.upconv2(forward_decode1layer2)
+        forward_encode2layer2_cropped = center_crop(forward_encode2layer2, forward_upconv2)
+        skipconnection2=torch.cat([forward_upconv2,forward_encode2layer2_cropped],dim=1)
+        BN_decode2layer1 = BatchNorm3d(self.decode2layer1.out_channels).to(device)
+        forward_decode2layer1=leaky_relu(BN_decode2layer1(self.decode2layer1(skipconnection2)))
+        BN_decode2layer2 = BatchNorm3d(self.decode2layer2.out_channels).to(device)
+        forward_decode2layer2 = leaky_relu(BN_decode2layer2(self.decode2layer2(forward_decode2layer1)))
+
+        forward_upconv3=self.upconv3(forward_decode2layer2)
+        forward_encode1layer2_cropped = center_crop(forward_encode1layer2, forward_upconv3)
+        skipconnection3=torch.cat([forward_upconv3,forward_encode1layer2_cropped],dim=1)
+        BN_decode3layer1 = BatchNorm3d(self.decode3layer1.out_channels).to(device)
+        forward_decode3layer1=leaky_relu(BN_decode3layer1(self.decode3layer1(skipconnection3)))
+        BN_decode3layer2 = BatchNorm3d(self.decode3layer2.out_channels).to(device)
+        forward_decode3layer2 = leaky_relu(BN_decode3layer2(self.decode3layer2(forward_decode3layer1)))
+
+        # output layer
+
+        out = self.outconv(forward_decode3layer2)
+        out_cropped = pad_to_match(out,x)
+        return out_cropped

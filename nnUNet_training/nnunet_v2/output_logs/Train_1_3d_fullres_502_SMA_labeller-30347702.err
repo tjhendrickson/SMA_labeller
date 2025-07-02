@@ -1,0 +1,65 @@
+/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py:164: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
+/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+multiprocessing.pool.RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/multiprocessing/pool.py", line 125, in worker
+    result = (True, func(*args, **kwds))
+                    ^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/multiprocessing/pool.py", line 51, in starmapstar
+    return list(itertools.starmap(args[0], args[1]))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/dataloading/utils.py", line 38, in _convert_to_npy
+    np.load(data_npy, mmap_mode='r')
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/numpy/lib/_npyio_impl.py", line 459, in load
+    fid = stack.enter_context(open(os.fspath(file), "rb"))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/cconelea/shared/projects/316_CBIT/BIDS_output/code/SMA_labeller/data/nnUNet/nnunet_v2/nnUNet_preprocessed/Dataset502_MICCAI2012_and_316_CBIT/nnUNetPlans_3d_fullres/1018.npy'
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/bin/nnUNetv2_train", line 8, in <module>
+    sys.exit(run_training_entry())
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/run/run_training.py", line 275, in run_training_entry
+    run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/run/run_training.py", line 211, in run_training
+    nnunet_trainer.run_training()
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py", line 1362, in run_training
+    self.on_train_start()
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py", line 919, in on_train_start
+    unpack_dataset(self.preprocessed_dataset_folder, unpack_segmentation=True, overwrite_existing=False,
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/dataloading/utils.py", line 66, in unpack_dataset
+    p.starmap(_convert_to_npy, zip(npz_files,
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/multiprocessing/pool.py", line 375, in starmap
+    return self._map_async(func, iterable, starmapstar, chunksize).get()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/multiprocessing/pool.py", line 774, in get
+    raise self._value
+FileNotFoundError: [Errno 2] No such file or directory: '/home/cconelea/shared/projects/316_CBIT/BIDS_output/code/SMA_labeller/data/nnUNet/nnunet_v2/nnUNet_preprocessed/Dataset502_MICCAI2012_and_316_CBIT/nnUNetPlans_3d_fullres/1018.npy'
+Exception in thread Thread-1 (results_loop):
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/threading.py", line 1075, in _bootstrap_inner
+Exception in thread Thread-2 (results_loop):
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/threading.py", line 1012, in run
+    self.run()
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 125, in results_loop
+    self._target(*self._args, **self._kwargs)
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 125, in results_loop
+    raise e
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 103, in results_loop
+    raise e
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 103, in results_loop
+    raise RuntimeError("One or more background workers are no longer alive. Exiting. Please check the "
+RuntimeError: One or more background workers are no longer alive. Exiting. Please check the print statements above for the actual error message
+    raise RuntimeError("One or more background workers are no longer alive. Exiting. Please check the "
+RuntimeError: One or more background workers are no longer alive. Exiting. Please check the print statements above for the actual error message

@@ -1,0 +1,78 @@
+/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py:164: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
+/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 53, in producer
+    item = next(data_loader)
+           ^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/data_loader.py", line 126, in __next__
+    return self.generate_train_batch()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/dataloading/data_loader_2d.py", line 21, in generate_train_batch
+    data, seg, properties = self._data.load_case(current_key)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/dataloading/nnunet_dataset.py", line 86, in load_case
+    data = np.load(entry['data_file'][:-4] + ".npy", 'r')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/numpy/lib/_npyio_impl.py", line 485, in load
+    return format.open_memmap(file, mode=mmap_mode,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/numpy/lib/format.py", line 972, in open_memmap
+    marray = numpy.memmap(filename, dtype=dtype, shape=shape, order=order,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/numpy/_core/memmap.py", line 280, in __new__
+    mm = mmap.mmap(fid.fileno(), bytes, access=acc, offset=start)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: mmap length is greater than file size
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 53, in producer
+    item = next(data_loader)
+           ^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/data_loader.py", line 126, in __next__
+    return self.generate_train_batch()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/dataloading/data_loader_2d.py", line 21, in generate_train_batch
+    data, seg, properties = self._data.load_case(current_key)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/dataloading/nnunet_dataset.py", line 86, in load_case
+    data = np.load(entry['data_file'][:-4] + ".npy", 'r')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/numpy/lib/_npyio_impl.py", line 485, in load
+    return format.open_memmap(file, mode=mmap_mode,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/numpy/lib/format.py", line 972, in open_memmap
+    marray = numpy.memmap(filename, dtype=dtype, shape=shape, order=order,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/numpy/_core/memmap.py", line 280, in __new__
+    mm = mmap.mmap(fid.fileno(), bytes, access=acc, offset=start)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: mmap length is greater than file size
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/bin/nnUNetv2_train", line 8, in <module>
+    sys.exit(run_training_entry())
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/run/run_training.py", line 275, in run_training_entry
+    run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/run/run_training.py", line 211, in run_training
+    nnunet_trainer.run_training()
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py", line 1377, in run_training
+    val_outputs.append(self.validation_step(next(self.dataloader_val)))
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 196, in __next__
+    item = self.__get_next_item()
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 181, in __get_next_item
+    raise RuntimeError("One or more background workers are no longer alive. Exiting. Please check the "
+RuntimeError: One or more background workers are no longer alive. Exiting. Please check the print statements above for the actual error message
+Exception in thread Thread-1 (results_loop):
+Traceback (most recent call last):
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 125, in results_loop
+    raise e
+  File "/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/batchgenerators/dataloading/nondet_multi_threaded_augmenter.py", line 103, in results_loop
+    raise RuntimeError("One or more background workers are no longer alive. Exiting. Please check the "
+RuntimeError: One or more background workers are no longer alive. Exiting. Please check the print statements above for the actual error message

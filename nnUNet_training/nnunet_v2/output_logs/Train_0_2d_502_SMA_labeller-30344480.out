@@ -1,0 +1,38 @@
+
+############################
+INFO: You are using the old nnU-Net default plans. We have updated our recommendations. Please consider using those instead! Read more here: https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/resenc_presets.md
+############################
+
+Using device: cuda:0
+
+#######################################################################
+Please cite the following paper when using nnU-Net:
+Isensee, F., Jaeger, P. F., Kohl, S. A., Petersen, J., & Maier-Hein, K. H. (2021). nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation. Nature methods, 18(2), 203-211.
+#######################################################################
+
+2025-01-23 12:08:18.500160: do_dummy_2d_data_aug: False
+2025-01-23 12:08:18.504809: Using splits from existing split file: /home/cconelea/shared/projects/316_CBIT/BIDS_output/code/SMA_labeller/data/nnUNet/nnunet_v2/nnUNet_preprocessed/Dataset502_MICCAI2012_and_316_CBIT/splits_final.json
+2025-01-23 12:08:18.508849: The split file contains 5 splits.
+2025-01-23 12:08:18.510452: Desired fold for training: 0
+2025-01-23 12:08:18.511757: This split has 52 training and 14 validation cases.
+using pin_memory on device 0
+using pin_memory on device 0
+2025-01-23 12:08:48.243695: Using torch.compile...
+
+This is the configuration used by this training:
+Configuration name: 2d
+ {'data_identifier': 'nnUNetPlans_2d', 'preprocessor_name': 'DefaultPreprocessor', 'batch_size': 66, 'patch_size': [256, 192], 'median_image_size_in_voxels': [255.0, 176.0], 'spacing': [1.0, 1.0], 'normalization_schemes': ['ZScoreNormalization'], 'use_mask_for_norm': [False], 'resampling_fn_data': 'resample_data_or_seg_to_shape', 'resampling_fn_seg': 'resample_data_or_seg_to_shape', 'resampling_fn_data_kwargs': {'is_seg': False, 'order': 3, 'order_z': 0, 'force_separate_z': None}, 'resampling_fn_seg_kwargs': {'is_seg': True, 'order': 1, 'order_z': 0, 'force_separate_z': None}, 'resampling_fn_probabilities': 'resample_data_or_seg_to_shape', 'resampling_fn_probabilities_kwargs': {'is_seg': False, 'order': 1, 'order_z': 0, 'force_separate_z': None}, 'architecture': {'network_class_name': 'dynamic_network_architectures.architectures.unet.PlainConvUNet', 'arch_kwargs': {'n_stages': 6, 'features_per_stage': [32, 64, 128, 256, 512, 512], 'conv_op': 'torch.nn.modules.conv.Conv2d', 'kernel_sizes': [[3, 3], [3, 3], [3, 3], [3, 3], [3, 3], [3, 3]], 'strides': [[1, 1], [2, 2], [2, 2], [2, 2], [2, 2], [2, 2]], 'n_conv_per_stage': [2, 2, 2, 2, 2, 2], 'n_conv_per_stage_decoder': [2, 2, 2, 2, 2], 'conv_bias': True, 'norm_op': 'torch.nn.modules.instancenorm.InstanceNorm2d', 'norm_op_kwargs': {'eps': 1e-05, 'affine': True}, 'dropout_op': None, 'dropout_op_kwargs': None, 'nonlin': 'torch.nn.LeakyReLU', 'nonlin_kwargs': {'inplace': True}, 'deep_supervision': True}, '_kw_requires_import': ['conv_op', 'norm_op', 'dropout_op', 'nonlin']}, 'batch_dice': True} 
+
+These are the global plan.json settings:
+ {'dataset_name': 'Dataset502_MICCAI2012_and_316_CBIT', 'plans_name': 'nnUNetPlans', 'original_median_spacing_after_transp': [1.0, 1.0, 1.0], 'original_median_shape_after_transp': [255, 255, 176], 'image_reader_writer': 'SimpleITKIO', 'transpose_forward': [0, 1, 2], 'transpose_backward': [0, 1, 2], 'experiment_planner_used': 'ExperimentPlanner', 'label_manager': 'LabelManager', 'foreground_intensity_properties_per_channel': {'0': {'max': 1713.0, 'mean': 784.4163208007812, 'median': 787.0, 'min': 1.0, 'percentile_00_5': 128.0, 'percentile_99_5': 1335.0, 'std': 241.68751525878906}}} 
+
+2025-01-23 12:08:50.441571: unpacking dataset...
+Exception in background worker 4:
+ mmap length is greater than file size
+Exception in background worker 2:
+ mmap length is greater than file size
+2025-01-23 12:09:05.295290: unpacking done...
+2025-01-23 12:09:05.347899: Unable to plot network architecture: nnUNet_compile is enabled!
+2025-01-23 12:09:05.442093: 
+2025-01-23 12:09:05.447922: Epoch 0
+2025-01-23 12:09:05.449735: Current learning rate: 0.01

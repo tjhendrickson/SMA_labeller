@@ -1,0 +1,7 @@
+/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py:164: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self.grad_scaler = GradScaler() if self.device.type == 'cuda' else None
+/users/3/hendr522/SW/miniconda3/envs/nnUNet_v2/lib/python3.12/site-packages/torch/optim/lr_scheduler.py:62: UserWarning: The verbose parameter is deprecated. Please use get_last_lr() to access the learning rate.
+  warnings.warn(
+slurmstepd: error: *** JOB 31863759 ON aga07 CANCELLED AT 2025-02-23T06:33:23 DUE TO TIME LIMIT ***
+slurmstepd: error: *** JOB 31863759 STEPD TERMINATED ON aga07 AT 2025-02-23T06:48:23 DUE TO JOB NOT ENDING WITH SIGNALS ***
+slurmstepd: error: Container 2607088 in cgroup plugin has 9 processes, giving up after 927 sec
