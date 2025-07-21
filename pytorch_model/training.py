@@ -13,7 +13,7 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
-from model import UNet3D, CustomMRIImageDataset, DiceLoss
+from model import UNet3D, Custom3DMRIImageDataset, DiceLoss,UNet2D
 from utils import enumerateWithEstimate
 import logging
 import argparse
@@ -21,15 +21,23 @@ import datetime
 import sys
 import os
 
+
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
+home_dir = os.path.expanduser('~')
+
 class SMALabellerApp:
     def __init__(self):
 
         parser = argparse.ArgumentParser(description='')
+        parser.add_argument('--unet_dimensions',
+                            help='Dimensions of the UNet model to use. 2D or 3D',
+                            default='3D',
+                            choices=['2D', '3D'],
+                            type=str)
         parser.add_argument('--num_workers',
                             help='Number of worker processes for background data loading',
                             default=8,
@@ -58,35 +66,42 @@ class SMALabellerApp:
                             help="Data prefix to use for Tensorboard run. Defaults to chapter.",
                             )
 
-        #parser.add_argument('comment',
-        #                    help="Comment suffix for Tensorboard run.",
-        #                    nargs='?',
-        #                    default='cconelea',
-        #                    )
+        parser.add_argument('comment',
+                            help="Comment suffix for Tensorboard run.",
+                            nargs='?',
+                            default='cconelea',
+                            )
         # parse arguments
         cli_args = parser.parse_args()
+        self.unet_dimensions = cli_args.unet_dimensions
         self.num_workers = cli_args.num_workers
         self.batch_size = cli_args.batch_size
         self.epochs = cli_args.epochs
         self.training_images = cli_args.training_images
         self.training_labels = cli_args.training_labels
         self.tb_prefix = cli_args.tb_prefix
-        #self.comment = cli_args.comment
+        self.comment = cli_args.comment
 
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
 
-        #self.trn_writer = None
-        #self.val_writer = None
+        self.trn_writer = None
+        self.val_writer = None
         self.totalTrainingSamples_count = 0
 
         self.device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 
-        self.train_loader = DataLoader(CustomMRIImageDataset(annotations_dir=self.training_labels, img_dir=self.training_images),
+        self.train_loader = DataLoader(Custom3DMRIImageDataset(annotations_dir=self.training_labels, img_dir=self.training_images),
                                        batch_size=self.batch_size, shuffle=True,num_workers=self.num_workers, pin_memory=True)
 
+        self.dice_loss = DiceLoss()
 
-    def initModel(self):
+    def init3dModel(self):
         model = UNet3D(n_class=1).to(self.device)
+        log.info("Using '{}".format(self.device))
+        return model
+    
+    def init2dModel(self):
+        model = UNet2D(n_class=1).to(self.device)
         log.info("Using '{}".format(self.device))
         return model
 
@@ -96,70 +111,139 @@ class SMALabellerApp:
                                                         epochs=self.epochs,steps_per_epoch=len(self.train_loader))
         return optimizer,scheduler
 
-    def computeBatchLoss(self,batch_idx,batch_tup,batch_size):
-        input_t,label_t, _series_list, _center_list = batch_tup
+    def compute2dBatchLoss(self,batch_idx,batch_tup,batch_size):
+
+        input_t, label_t = batch_tup
 
         input_g = input_t.to(self.device, non_blocking=True)
+        if batch_size == 1:
+            for i in range(input_g.shape[-1]): # Iterate over the depth dimension
+                output_g = self.model(input_g[:, :, :, :, i]) # don't want i:i+1 here as it is a 2D slice
+                label_g = label_t.to(self.device, non_blocking=True)[:, :, :, :, i:i+1]
+                loss = self.dice_loss(output_g, label_g)
+                if i == 0:
+                    total_loss = loss
+                else:
+                    total_loss += loss
+        elif batch_size > 1:
+            for i in range(input_g.shape[0]): # Iterate over the batch dimension
+                for j in range(input_g.shape[-1]): # Iterate over the depth dimension
+                    output_g = self.model(input_g[i:i+1, :, :, :, j:j+1])
+                    label_g = label_t.to(self.device, non_blocking=True)[i:i+1, :, :, :, j:j+1]
+                    loss = self.dice_loss(output_g, label_g)
+                    if i == 0 and j == 0:
+                        total_loss = loss
+                    else:
+                        total_loss += loss
+
+        return total_loss.mean()
+    
+    def compute3dBatchLoss(self,batch_idx,batch_tup,batch_size):
+
+        input_t, label_t = batch_tup
+
+        input_g = input_t.to(self.device, non_blocking=True)
+        output_g = self.model(input_g)
         label_g = label_t.to(self.device, non_blocking=True)
 
-        loss = DiceLoss()(input_g, label_g)
-
-        # TODO keep going
-        return loss.mean()
+        loss = self.dice_loss(output_g, label_g)
+        return loss
 
     def initTensorboardWriters(self):
         if self.trn_writer is None:
-            log_dir = os.path.join('runs', self.cli_args.tb_prefix, self.time_str)
+            log_dir = os.path.join(home_dir,'runs', self.tb_prefix, self.time_str)
 
             self.trn_writer = SummaryWriter(
-                log_dir=log_dir + '-trn_cls-' + self.cli_args.comment)
+                log_dir=log_dir + '-trn_cls-' + self.comment)
             self.val_writer = SummaryWriter(
-                log_dir=log_dir + '-val_cls-' + self.cli_args.comment)
+                log_dir=log_dir + '-val_cls-' + self.comment)
+    
+    def logMetrics(self,epoch, batch_idx, loss):
+        if self.trn_writer is not None:
+            self.trn_writer.add_scalar('loss', loss.item(), epoch * len(self.train_loader) + batch_idx)
+            self.trn_writer.flush()
+        else:
+            log.warning("Tensorboard writer not initialized. Metrics will not be logged.")
 
-    def doTraining(self):
+    def do3dTraining(self):
         scaler = torch.cuda.amp.GradScaler()
+        self.model.zero_grad()
+        self.model.train()
         for epoch in range(self.epochs):
-            """
-            log.info("Epoch {} of {}, batches of size {}".format(
-                epoch,
-                self.epochs,
-                len(self.train_loader),
-                self.batch_size
-            ))
-            """
             print("Epoch {} of {}, batches of size {}".format(
                 epoch,
                 self.epochs,
                 len(self.train_loader),
                 self.batch_size
             ))
-            # TODO need to ascertain how this works
             batch_iter = enumerateWithEstimate(
                 self.train_loader,
                 "E{} Training".format(epoch),
                 start_ndx=self.train_loader.num_workers,
             )
-            for image, mask in self.train_loader:
-                image, mask = image.cuda(), mask.cuda()
-
-                self.optimizer.zero_grad()
-
+            for batch_idx, batch_tup in batch_iter:
+                
+                # Use autocast for mixed precision training
                 with torch.cuda.amp.autocast():
-                    output = self.model(image)
-                    loss = DiceLoss()(output, mask)
-
+                    loss = self.compute3dBatchLoss(batch_idx, batch_tup, self.batch_size)
+                
+                # Log the loss
+                if batch_idx % 10 == 0:
+                    print("Epoch {} Batch {} Loss: {:.4f}".format(
+                        epoch, batch_idx, loss.item()))
+                    self.logMetrics(epoch, batch_idx, loss)
                 scaler.scale(loss).backward()
                 scaler.step(self.optimizer)
                 scaler.update()
+                self.scheduler.step()
+                self.model.zero_grad()
 
-            self.scheduler.step()
+    def do2dTraining(self):
+        scaler = torch.cuda.amp.GradScaler()
+        self.model.zero_grad()
+        self.model.train()
+        for epoch in range(self.epochs):
+            print("Epoch {} of {}, batches of size {}".format(
+                epoch,
+                self.epochs,
+                len(self.train_loader),
+                self.batch_size
+            ))
+            batch_iter = enumerateWithEstimate(
+                self.train_loader,
+                "E{} Training".format(epoch),
+                start_ndx=self.train_loader.num_workers,
+            )
+            for batch_idx, batch_tup in batch_iter:
+                
+                # Use autocast for mixed precision training
+                with torch.cuda.amp.autocast():
+                    loss = self.compute2dBatchLoss(batch_idx, batch_tup, self.batch_size)
+                
+                # Log the loss
+                if batch_idx % 10 == 0:
+                    print("Epoch {} Batch {} Loss: {:.4f}".format(
+                        epoch, batch_idx, loss.item()))
+                    self.logMetrics(epoch, batch_idx, loss)
+                scaler.scale(loss).backward()
+                scaler.step(self.optimizer)
+                scaler.update()
+                self.scheduler.step()
+                self.model.zero_grad()
+            
 
     def main(self):
-        self.model = self.initModel()
-        self.optimizer, self.scheduler = self.initOptimizer()
-
-        self.doTraining()
-
+        log.info("Starting SMALabellerApp with unet_dimensions: {}".format(self.unet_dimensions))
+        if self.unet_dimensions == '2D':
+            self.model = self.init2dModel()
+            self.optimizer, self.scheduler = self.initOptimizer()
+            self.initTensorboardWriters()
+            self.do2dTraining()
+        elif self.unet_dimensions == '3D':
+            self.model = self.init3dModel()
+            self.optimizer, self.scheduler = self.initOptimizer()
+            self.initTensorboardWriters()
+            self.do3dTraining()
 
 SMALabellerApp().main()
 

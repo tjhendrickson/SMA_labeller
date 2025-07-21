@@ -3,7 +3,7 @@ import pdb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import BatchNorm3d
+from torch.nn import BatchNorm3d,BatchNorm2d
 from torch.nn.functional import leaky_relu
 
 from torch.utils.data import Dataset
@@ -16,7 +16,7 @@ import diskcache as dc
 device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 home_dir = os.path.expanduser('~')
 
-def center_crop(in_tensor, target_size):
+def center_crop_3d(in_tensor, target_size):
     _, _, h, w, d = in_tensor.size()
     _, _, th, tw, td = target_size.size()
     x1 = (h - th) // 2
@@ -24,8 +24,16 @@ def center_crop(in_tensor, target_size):
     z1 = (d - td) // 2
     return in_tensor[:, :, x1:x1+th, y1:y1+tw, z1:z1+td]
 
+def center_crop_2d(tensor, target_tensor):
+    _, _, h, w = tensor.size()
+    _, _, th, tw = target_tensor.size()
+    x1 = (h - th) // 2
+    y1 = (w - tw) // 2
+    return tensor[:, :, x1:x1+th, y1:y1+tw]
 
-def pad_to_match(in_tensor, target_size):
+
+
+def pad_to_match_3d(in_tensor, target_size):
     _, _, h, w, d = in_tensor.size()
     _, _, th, tw, td = target_size.size()
     diffX = th - h
@@ -35,15 +43,45 @@ def pad_to_match(in_tensor, target_size):
                           diffY // 2, diffY - diffY // 2,
                           diffZ // 2, diffZ - diffZ // 2])
 
+def pad_to_match_2d(output, reference):
+    diffY = reference.size()[2] - output.size()[2]
+    diffX = reference.size()[3] - output.size()[3]
+    return F.pad(output, [diffX // 2, diffX - diffX // 2,
+                          diffY // 2, diffY - diffY // 2])
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
 class DiceLoss(nn.Module):
-    def forward(self, inputs, targets, smooth=1):
-        inputs = torch.sigmoid(inputs)
+    def __init__(self, smooth=1.):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, inputs, targets):
+        
+        # Flatten
+        inputs = inputs.contiguous().view(-1)
+        targets = targets.contiguous().view(-1)
+
         intersection = (inputs * targets).sum()
-        dice = (2.*intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
-        return 1 - dice
+        dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
+
+        return 1 - dice  # This will be a tensor that retains gradients
 
 
-class CustomMRIImageDataset(Dataset):
+class Custom3DMRIImageDataset(Dataset):
     nib.Nifti1Header.quaternion_threshold = -1e-06
     def __init__(self,annotations_dir,img_dir,augmentations=None,cache_dir=os.path.join(home_dir,'.mri_cache')):
         self.annotations_dir = annotations_dir
@@ -103,6 +141,61 @@ class CustomMRIImageDataset(Dataset):
         #if self.augmentations:
 
         return image_data_tensor, label_data_tensor
+
+
+class UNet2D(nn.Module):
+    def __init__(self, n_class):
+        super().__init__()
+        self.enc1 = DoubleConv(1, 64)
+        self.pool1 = nn.MaxPool2d(2)
+        self.enc2 = DoubleConv(64, 128)
+        self.pool2 = nn.MaxPool2d(2)
+        self.enc3 = DoubleConv(128, 256)
+        self.pool3 = nn.MaxPool2d(2)
+        self.enc4 = DoubleConv(256, 512)
+        self.pool4 = nn.MaxPool2d(2)
+        self.bottleneck = DoubleConv(512, 1024)
+
+        self.upconv1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(1024, 512)
+        self.upconv2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec2 = DoubleConv(512, 256)
+        self.upconv3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec3 = DoubleConv(256, 128)
+        self.upconv4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec4 = DoubleConv(128, 64)
+
+        self.outconv = nn.Conv2d(64, n_class, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        forward_encode_1 = self.enc1(x)
+        forward_encode_2 = self.enc2(self.pool1(forward_encode_1))
+        forward_encode_3 = self.enc3(self.pool2(forward_encode_2))
+        forward_encode_4 = self.enc4(self.pool3(forward_encode_3))
+        forward_encode_5 = self.bottleneck(self.pool4(forward_encode_4))
+
+        # Decoder
+        forward_upconv_1 = self.upconv1(forward_encode_5)
+        forward_encode_4_cropped = center_crop_2d(forward_encode_4, forward_upconv_1)
+        forward_decode_1 = self.dec1(torch.cat([forward_upconv_1, forward_encode_4_cropped], dim=1))
+
+        forward_upconv_2 = self.upconv2(forward_decode_1)
+        forward_encode_3_cropped = center_crop_2d(forward_encode_3, forward_upconv_2)
+        forward_decode_2 = self.dec2(torch.cat([forward_upconv_2, forward_encode_3_cropped], dim=1))
+
+        forward_upconv_3 = self.upconv3(forward_decode_2)
+        forward_encode_2_cropped = center_crop_2d(forward_encode_2, forward_upconv_3)
+        forward_decode_3 = self.dec3(torch.cat([forward_upconv_3, forward_encode_2_cropped], dim=1))
+
+        forward_upconv_4 = self.upconv4(forward_decode_3)
+        forward_encode_1_cropped = center_crop_2d(forward_encode_1, forward_upconv_4)
+        forward_decode_4 = self.dec4(torch.cat([forward_upconv_4, forward_encode_1_cropped], dim=1))
+
+        out = self.outconv(forward_decode_4)
+        return pad_to_match_2d(out, x)
+
+
 
 class UNet3D(nn.Module):
     def __init__(self,n_class):
@@ -171,7 +264,7 @@ class UNet3D(nn.Module):
 
         # Decoder
         forward_upconv1=self.upconv1(forward_encode4layer2)
-        forward_encode3layer2_cropped = center_crop(forward_encode3layer2, forward_upconv1)
+        forward_encode3layer2_cropped = center_crop_3d(forward_encode3layer2, forward_upconv1)
         skipconnection1=torch.cat([forward_upconv1,forward_encode3layer2_cropped],dim=1)
         BN_decode1layer1 = BatchNorm3d(self.decode1layer1.out_channels).to(device)
         forward_decode1layer1=leaky_relu(BN_decode1layer1(self.decode1layer1(skipconnection1)))
@@ -179,7 +272,7 @@ class UNet3D(nn.Module):
         forward_decode1layer2 = leaky_relu(BN_decode1layer2(self.decode1layer2(forward_decode1layer1)))
 
         forward_upconv2=self.upconv2(forward_decode1layer2)
-        forward_encode2layer2_cropped = center_crop(forward_encode2layer2, forward_upconv2)
+        forward_encode2layer2_cropped = center_crop_3d(forward_encode2layer2, forward_upconv2)
         skipconnection2=torch.cat([forward_upconv2,forward_encode2layer2_cropped],dim=1)
         BN_decode2layer1 = BatchNorm3d(self.decode2layer1.out_channels).to(device)
         forward_decode2layer1=leaky_relu(BN_decode2layer1(self.decode2layer1(skipconnection2)))
@@ -187,7 +280,7 @@ class UNet3D(nn.Module):
         forward_decode2layer2 = leaky_relu(BN_decode2layer2(self.decode2layer2(forward_decode2layer1)))
 
         forward_upconv3=self.upconv3(forward_decode2layer2)
-        forward_encode1layer2_cropped = center_crop(forward_encode1layer2, forward_upconv3)
+        forward_encode1layer2_cropped = center_crop_3d(forward_encode1layer2, forward_upconv3)
         skipconnection3=torch.cat([forward_upconv3,forward_encode1layer2_cropped],dim=1)
         BN_decode3layer1 = BatchNorm3d(self.decode3layer1.out_channels).to(device)
         forward_decode3layer1=leaky_relu(BN_decode3layer1(self.decode3layer1(skipconnection3)))
@@ -197,5 +290,5 @@ class UNet3D(nn.Module):
         # output layer
 
         out = self.outconv(forward_decode3layer2)
-        out_cropped = pad_to_match(out,x)
+        out_cropped = pad_to_match_3d(out,x)
         return out_cropped
