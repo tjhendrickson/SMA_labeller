@@ -1,17 +1,19 @@
-import pdb
+import os
+from glob import glob
+import numpy as np
+import nibabel as nib
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import BatchNorm3d,BatchNorm2d
 from torch.nn.functional import leaky_relu
-
 from torch.utils.data import Dataset
-import os
-from glob import glob
-import nibabel as nib
-import numpy as np
-import diskcache as dc
+
+from monai.transforms import (
+    Compose, LoadImaged, EnsureChannelFirstd, Spacingd, Orientationd, ScaleIntensityd,
+    RandFlipd, RandAffined, RandGaussianNoised, RandCropByPosNegLabeld)
+from monai.data import CacheDataset
 
 device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 home_dir = os.path.expanduser('~')
@@ -80,6 +82,76 @@ class DiceLoss(nn.Module):
 
         return 1 - dice  # This will be a tensor that retains gradients
 
+class Custom3DMRIDatasetMONAI:
+    def __init__(
+        self,
+        img_dir,
+        label_dir,
+        transforms=True,
+        cache_rate=1.0,
+        num_workers=4,
+        pixdim=(1.0, 1.0, 1.0)
+    ):
+        self.img_dir = img_dir
+        self.label_dir = label_dir
+        self.transforms = transforms
+        self.cache_rate = cache_rate
+        self.num_workers = num_workers
+        self.pixdim = pixdim
+
+        # Build image-label file pairs
+        self.data_dicts = self._build_data_dicts()
+
+        # Create MONAI CacheDataset
+        if self.transforms is True:
+            # Compose transforms
+            self.transforms = self._build_transforms()
+            self.dataset = CacheDataset(
+                data=self.data_dicts,
+                transform=self.transforms,
+                cache_rate=self.cache_rate,
+                num_workers=self.num_workers)
+        else:
+            self.dataset = CacheDataset(
+                data=self.data_dicts,
+                cache_rate=self.cache_rate,
+                num_workers=self.num_workers)
+
+    def _build_data_dicts(self):
+        label_paths = sorted(glob(os.path.join(self.label_dir, '*.nii.gz')))
+        data_dicts = []
+        for label_path in label_paths:
+            base = os.path.basename(label_path).split('.')[0]
+            image_path = os.path.join(self.img_dir, base + '_0000.nii.gz')
+            if os.path.exists(image_path):
+                data_dicts.append({
+                    "image": image_path,
+                    "label": label_path
+                })
+        return data_dicts
+
+    def _build_transforms(self):
+        base_transforms = [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Orientationd(keys=["image", "label"], axcodes="RAS"),
+            Spacingd(keys=["image", "label"], pixdim=self.pixdim, mode=("bilinear", "nearest")),
+            ScaleIntensityd(keys="image")
+        ]
+
+        if self.augmentations is not None:
+            base_transforms += self.augmentations
+
+        return Compose(base_transforms)
+
+    def get_dataset(self):
+        return self.dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
 
 class Custom3DMRIImageDataset(Dataset):
     nib.Nifti1Header.quaternion_threshold = -1e-06
