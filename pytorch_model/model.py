@@ -12,11 +12,19 @@ from torch.utils.data import Dataset
 
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Spacingd, Orientationd, ScaleIntensityd,
-    RandFlipd, RandAffined, RandGaussianNoised, RandCropByPosNegLabeld)
+    RandFlipd, RandAffined, RandGaussianNoised, RandCropByPosNegLabeld, CastToTyped)
 from monai.data import CacheDataset
+from monai.losses import DiceLoss, DiceCELoss
+
+import diskcache as dc
+
+import pdb
 
 device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 home_dir = os.path.expanduser('~')
+#loss_fn = DiceLoss(sigmoid=True,reduction="mean",include_background=True)
+loss_fn = DiceCELoss(sigmoid=True, reduction="mean", include_background=True)
+
 
 def center_crop_3d(in_tensor, target_size):
     _, _, h, w, d = in_tensor.size()
@@ -66,6 +74,12 @@ class DoubleConv(nn.Module):
     def forward(self, x):
         return self.double_conv(x)
 
+def MONAIDiceLoss(inputs, targets):
+    loss = loss_fn(inputs, targets)
+    return loss
+
+    
+
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1.):
         super(DiceLoss, self).__init__()
@@ -73,6 +87,9 @@ class DiceLoss(nn.Module):
 
     def forward(self, inputs, targets):
         
+        # Apply sigmoid since inputs are logits
+        inputs = torch.sigmoid(inputs)       
+
         # Flatten
         inputs = inputs.contiguous().view(-1)
         targets = targets.contiguous().view(-1)
@@ -87,14 +104,13 @@ class Custom3DMRIDatasetMONAI:
         self,
         img_dir,
         label_dir,
-        transforms=True,
+        augmentations=True,
         cache_rate=1.0,
         num_workers=4,
-        pixdim=(1.0, 1.0, 1.0)
-    ):
+        pixdim=(1.0, 1.0, 1.0)):
         self.img_dir = img_dir
         self.label_dir = label_dir
-        self.transforms = transforms
+        self.augmentations = augmentations
         self.cache_rate = cache_rate
         self.num_workers = num_workers
         self.pixdim = pixdim
@@ -102,20 +118,15 @@ class Custom3DMRIDatasetMONAI:
         # Build image-label file pairs
         self.data_dicts = self._build_data_dicts()
 
+        # Compose transforms
+        self.transforms = self._build_transforms()
+
         # Create MONAI CacheDataset
-        if self.transforms is True:
-            # Compose transforms
-            self.transforms = self._build_transforms()
-            self.dataset = CacheDataset(
-                data=self.data_dicts,
-                transform=self.transforms,
-                cache_rate=self.cache_rate,
-                num_workers=self.num_workers)
-        else:
-            self.dataset = CacheDataset(
-                data=self.data_dicts,
-                cache_rate=self.cache_rate,
-                num_workers=self.num_workers)
+        self.dataset = CacheDataset(
+            data=self.data_dicts,
+            transform=self.transforms,
+            cache_rate=self.cache_rate,
+            num_workers=self.num_workers)
 
     def _build_data_dicts(self):
         label_paths = sorted(glob(os.path.join(self.label_dir, '*.nii.gz')))
@@ -129,20 +140,39 @@ class Custom3DMRIDatasetMONAI:
                     "label": label_path
                 })
         return data_dicts
+        
 
     def _build_transforms(self):
         base_transforms = [
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             Orientationd(keys=["image", "label"], axcodes="RAS"),
-            Spacingd(keys=["image", "label"], pixdim=self.pixdim, mode=("bilinear", "nearest")),
-            ScaleIntensityd(keys="image")
+            Spacingd(keys=["image", "label"], pixdim=self.pixdim, mode=["bilinear", "nearest"]),
+            ScaleIntensityd(keys="image"),
+            CastToTyped(keys=["label"], dtype=np.float32)
         ]
-
-        if self.augmentations is not None:
-            base_transforms += self.augmentations
-
+        if self.augmentations:
+            base_transforms += self._add_augmentations()
         return Compose(base_transforms)
+    
+    def _add_augmentations(self):
+        augmentations = [
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
+            RandAffined(keys=["image", "label"], mode=["bilinear","nearest"], prob=0.5, rotate_range=(np.pi/18, np.pi/18, np.pi/18), scale_range=(0.1, 0.1, 0.1)),
+            RandGaussianNoised(keys="image", prob=0.5, mean=0.0, std=0.1),
+            RandCropByPosNegLabeld(
+                keys=["image", "label"],
+                label_key="label",
+                spatial_size=(128, 128, 128),
+                pos=1,
+                neg=1,
+                num_samples=4,
+                image_key="image"
+            )]
+
+        return augmentations
 
     def get_dataset(self):
         return self.dataset
@@ -155,7 +185,7 @@ class Custom3DMRIDatasetMONAI:
 
 class Custom3DMRIImageDataset(Dataset):
     nib.Nifti1Header.quaternion_threshold = -1e-06
-    def __init__(self,annotations_dir,img_dir,augmentations=None,cache_dir=os.path.join(home_dir,'.mri_cache')):
+    def __init__(self,img_dir,annotations_dir,augmentations=None,cache_dir=os.path.join(home_dir,'.mri_cache')):
         self.annotations_dir = annotations_dir
         self.img_dir = img_dir
         self.augmentations = augmentations

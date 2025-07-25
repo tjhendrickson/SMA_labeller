@@ -9,11 +9,9 @@ import ray.cloudpickle as pickle
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import random_split
-import torchvision
-import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
-from model import UNet3D, Custom3DMRIImageDataset, DiceLoss,UNet2D
+from model import UNet3D, Custom3DMRIImageDataset, Custom3DMRIDatasetMONAI, DiceLoss,UNet2D, MONAIDiceLoss
 from utils import enumerateWithEstimate
 import logging
 import argparse
@@ -21,6 +19,10 @@ import datetime
 import sys
 import os
 
+from monai.data import DataLoader as MONAIDataLoader
+from monai.data import pad_list_data_collate
+
+import pdb
 
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
@@ -90,8 +92,13 @@ class SMALabellerApp:
 
         self.device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 
-        self.train_loader = DataLoader(Custom3DMRIImageDataset(annotations_dir=self.training_labels, img_dir=self.training_images),
-                                       batch_size=self.batch_size, shuffle=True,num_workers=self.num_workers, pin_memory=True)
+        #self.train_loader = DataLoader(Custom3DMRIImageDataset(img_dir=self.training_images, annotations_dir=self.training_labels),
+        #                               batch_size=self.batch_size, shuffle=True,num_workers=self.num_workers, pin_memory=True)
+        self.train_loader = MONAIDataLoader(Custom3DMRIDatasetMONAI(img_dir=self.training_images,label_dir=self.training_labels),
+                                       batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True,
+                                       collate_fn=pad_list_data_collate)
+        self.totalTrainingSamples_count = len(self.train_loader.dataset)
+        log.info("Total training samples: {}".format(self.totalTrainingSamples_count))
 
         self.dice_loss = DiceLoss()
 
@@ -111,32 +118,34 @@ class SMALabellerApp:
                                                         epochs=self.epochs,steps_per_epoch=len(self.train_loader))
         return optimizer,scheduler
 
-    def compute2dBatchLoss(self,batch_idx,batch_tup,batch_size):
-
-        input_t, label_t = batch_tup
+    def compute2dBatchLoss(self,batch_idx,batch,batch_size):
+        running_loss = 0.0
+        if isinstance(batch, dict):
+            # MONAI DataLoader returns a dict
+            input_t = batch['image']
+            label_t = batch['label']
+        elif isinstance(batch, list):
+            # Custom DataLoader returns a list
+            input_t, label_t = batch
 
         input_g = input_t.to(self.device, non_blocking=True)
         if batch_size == 1:
             for i in range(input_g.shape[-1]): # Iterate over the depth dimension
                 output_g = self.model(input_g[:, :, :, :, i]) # don't want i:i+1 here as it is a 2D slice
-                label_g = label_t.to(self.device, non_blocking=True)[:, :, :, :, i:i+1]
-                loss = self.dice_loss(output_g, label_g)
-                if i == 0:
-                    total_loss = loss
-                else:
-                    total_loss += loss
+                label_g = label_t.to(self.device, non_blocking=True)[:, :, :, :, i]
+                #loss = self.dice_loss(output_g, label_g)
+                loss = MONAIDiceLoss(output_g, label_g)
+                running_loss += loss
         elif batch_size > 1:
             for i in range(input_g.shape[0]): # Iterate over the batch dimension
                 for j in range(input_g.shape[-1]): # Iterate over the depth dimension
-                    output_g = self.model(input_g[i:i+1, :, :, :, j:j+1])
-                    label_g = label_t.to(self.device, non_blocking=True)[i:i+1, :, :, :, j:j+1]
-                    loss = self.dice_loss(output_g, label_g)
-                    if i == 0 and j == 0:
-                        total_loss = loss
-                    else:
-                        total_loss += loss
+                    output_g = self.model(input_g[i:i+1, :, :, :, j])
+                    label_g = label_t.to(self.device, non_blocking=True)[i:i+1, :, :, :, j]
+                    #loss = self.dice_loss(output_g, label_g)
+                    loss = MONAIDiceLoss(output_g, label_g)
+                    running_loss += loss
 
-        return total_loss.mean()
+        return running_loss / (input_g.shape[0] * input_g.shape[-1])  # Average loss over batch and depth
     
     def compute3dBatchLoss(self,batch_idx,batch_tup,batch_size):
 
@@ -214,6 +223,7 @@ class SMALabellerApp:
                 "E{} Training".format(epoch),
                 start_ndx=self.train_loader.num_workers,
             )
+            
             for batch_idx, batch_tup in batch_iter:
                 
                 # Use autocast for mixed precision training
@@ -231,7 +241,6 @@ class SMALabellerApp:
                 self.scheduler.step()
                 self.model.zero_grad()
             
-
     def main(self):
         log.info("Starting SMALabellerApp with unet_dimensions: {}".format(self.unet_dimensions))
         if self.unet_dimensions == '2D':

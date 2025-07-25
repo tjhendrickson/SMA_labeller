@@ -7,6 +7,8 @@ import logging
 
 import numpy as np
 
+import pdb
+
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 log.setLevel(logging.INFO)
@@ -20,6 +22,7 @@ def enumerateWithEstimate(
         backoff=None,
         iter_len=None,
 ):
+
     """
     In terms of behavior, `enumerateWithEstimate` is almost identical
     to the standard `enumerate` (the differences are things like how
@@ -98,7 +101,9 @@ def enumerateWithEstimate(
         iter_len,
     ))
     start_ts = time.time()
+    
     for (current_ndx, item) in enumerate(iter):
+
         yield (current_ndx, item)
         if current_ndx == print_ndx:
             # ... <1>
