@@ -25,7 +25,6 @@ home_dir = os.path.expanduser('~')
 #loss_fn = DiceLoss(sigmoid=True,reduction="mean",include_background=True)
 loss_fn = DiceCELoss(sigmoid=True, reduction="mean", include_background=True)
 
-
 def center_crop_3d(in_tensor, target_size):
     _, _, h, w, d = in_tensor.size()
     _, _, th, tw, td = target_size.size()
@@ -40,8 +39,6 @@ def center_crop_2d(tensor, target_tensor):
     x1 = (h - th) // 2
     y1 = (w - tw) // 2
     return tensor[:, :, x1:x1+th, y1:y1+tw]
-
-
 
 def pad_to_match_3d(in_tensor, target_size):
     _, _, h, w, d = in_tensor.size()
@@ -78,14 +75,16 @@ def MONAIDiceLoss(inputs, targets):
     loss = loss_fn(inputs, targets)
     return loss
 
-    
-
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1.):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
+        self.bce = nn.BCEWithLogitsLoss(reduction='mean')  # expects raw logits
 
     def forward(self, inputs, targets):
+
+        # compute binary cross-entropy loss from logits
+        bce_loss = self.bce(inputs, targets.float())
         
         # Apply sigmoid since inputs are logits
         inputs = torch.sigmoid(inputs)       
@@ -97,26 +96,23 @@ class DiceLoss(nn.Module):
         intersection = (inputs * targets).sum()
         dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
 
-        return 1 - dice  # This will be a tensor that retains gradients
+        dice_loss = 1 - dice  # Dice loss is 1 - Dice coefficient
+
+        return dice_loss + bce_loss  # Combine BCE and Dice loss
 
 class Custom3DMRIDatasetMONAI:
     def __init__(
         self,
-        img_dir,
-        label_dir,
+        data_dicts,
         augmentations=True,
         cache_rate=1.0,
         num_workers=4,
         pixdim=(1.0, 1.0, 1.0)):
-        self.img_dir = img_dir
-        self.label_dir = label_dir
+        self.data_dicts = data_dicts
         self.augmentations = augmentations
         self.cache_rate = cache_rate
         self.num_workers = num_workers
         self.pixdim = pixdim
-
-        # Build image-label file pairs
-        self.data_dicts = self._build_data_dicts()
 
         # Compose transforms
         self.transforms = self._build_transforms()
@@ -127,20 +123,6 @@ class Custom3DMRIDatasetMONAI:
             transform=self.transforms,
             cache_rate=self.cache_rate,
             num_workers=self.num_workers)
-
-    def _build_data_dicts(self):
-        label_paths = sorted(glob(os.path.join(self.label_dir, '*.nii.gz')))
-        data_dicts = []
-        for label_path in label_paths:
-            base = os.path.basename(label_path).split('.')[0]
-            image_path = os.path.join(self.img_dir, base + '_0000.nii.gz')
-            if os.path.exists(image_path):
-                data_dicts.append({
-                    "image": image_path,
-                    "label": label_path
-                })
-        return data_dicts
-        
 
     def _build_transforms(self):
         base_transforms = [
@@ -168,7 +150,7 @@ class Custom3DMRIDatasetMONAI:
                 spatial_size=(128, 128, 128),
                 pos=1,
                 neg=1,
-                num_samples=4,
+                num_samples=1,
                 image_key="image"
             )]
 

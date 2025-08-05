@@ -5,6 +5,8 @@ import gc
 import time
 import logging
 
+import torch
+
 import numpy as np
 
 import pdb
@@ -13,6 +15,21 @@ log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
+
+
+
+def benchmark_loss_step(compute_fn, *args, **kwargs):
+    torch.cuda.reset_peak_memory_stats()
+    start_time = time.time()
+
+    with torch.cuda.amp.autocast():
+        loss = compute_fn(*args, **kwargs)
+
+    torch.cuda.synchronize()  # ensure accurate timing
+    elapsed = time.time() - start_time
+    peak_mem = torch.cuda.max_memory_allocated() / 1024**2  # in MB
+
+    return loss, elapsed, peak_mem
 
 def enumerateWithEstimate(
         iter,
