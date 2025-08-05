@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import random_split
 from torch.utils.tensorboard import SummaryWriter
+import torch.nn as nn
 
 from model import UNet3D, Custom3DMRIImageDataset, Custom3DMRIDatasetMONAI, DiceLoss,UNet2D, MONAIDiceLoss
 from utils import enumerateWithEstimate,benchmark_loss_step
@@ -33,6 +34,27 @@ log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
 home_dir = os.path.expanduser('~')
+
+
+def forward_slices_only(model, batch, device, slice_batch: int = 16):
+    # unpack
+    if isinstance(batch, dict):
+        x = batch['image'].as_tensor().to(device, non_blocking=True)
+    else:
+        x, _ = batch
+    x = x.to(device, non_blocking=True)
+
+    # [B,C,H,W,D] -> [B*D,C,H,W]
+    B, C, H, W, D = x.shape
+    x = x.permute(0, 4, 1, 2, 3).reshape(B * D, C, H, W)
+
+    # micro-batch so calibration never OOMs
+    N = x.shape[0]
+    for s in range(0, N, slice_batch):
+        e = min(s + slice_batch, N)
+        _ = model(x[s:e])  # forward only
+    
+
 
 class SMALabellerApp:
     def __init__(self):
@@ -104,7 +126,6 @@ class SMALabellerApp:
 
         train_files, val_files = train_test_split(self.data_dicts, test_size=self.val_set_size, random_state=42)
 
-
         self.train_loader = MONAIDataLoader(Custom3DMRIDatasetMONAI(train_files),
             batch_size=self.batch_size,shuffle=True,num_workers=self.num_workers,
             pin_memory=True,collate_fn=pad_list_data_collate)
@@ -130,6 +151,32 @@ class SMALabellerApp:
                 })
         return data_dicts
 
+    def reset_bn_running_stats(self):
+        """
+        Reset the running statistics of all BatchNorm2d layers in the model.
+        This is useful for re-initializing the model's BatchNorm layers
+        after loading a new dataset or changing the model architecture.
+        """
+        for m in self.model.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.reset_running_stats()  # zero mean, one var, reset counters
+
+    @torch.no_grad()
+    def calibrate_bn(self, forward_fn, warmup_batches: int = 8):
+        """
+        Put BN layers into train() so they update running stats.
+        Do a few forward passes (no loss/no backprop) to refresh stats.
+        Keep it FP32 for numerics; micro-batch inside forward_fn to avoid OOM.
+        """
+        self.model.train()
+        # (Optional) disable autocast to avoid fp16 noise in BN stats
+        with torch.cuda.amp.autocast(enabled=False), torch.inference_mode():
+            for i, batch in enumerate(self.train_loader):
+                if i >= warmup_batches:
+                    break
+                forward_fn(batch)  # forward pass only (no loss/backward)
+        # After calibration you'll switch to eval() before validation
+
     def init3dModel(self):
         model = UNet3D(n_class=1).to(self.device)
         log.info("Using '{}".format(self.device))
@@ -139,6 +186,7 @@ class SMALabellerApp:
         model = UNet2D(n_class=1).to(self.device)
         log.info("Using '{}".format(self.device))
         return model
+
 
     def initOptimizer(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
@@ -164,12 +212,19 @@ class SMALabellerApp:
         label_slices = label_g.permute(0, 4, 1, 2, 3).reshape(B * D, C, H, W)
 
         # Forward pass
-        output_g = self.model(input_slices)
+        with torch.cuda.amp.autocast():
+            output_g = self.model(input_slices)
+
+        if torch.isnan(output_g).any():
+            print(f"[NaN Warning] NaNs in model output at batch {batch_idx}")
+        if torch.isnan(label_slices).any():
+            print(f"[NaN Warning] NaNs in label at batch {batch_idx}")
 
         # Compute loss
         
         #loss = self.dice_loss(output_g, label_slices)
-        loss = MONAIDiceLoss(output_g,label_slices)
+        with torch.cuda.amp.autocast(enabled=False): # Loss in FP32
+            loss = MONAIDiceLoss(output_g.float(),label_slices.float())
 
         return loss # return loss for entire batch
     
@@ -228,6 +283,7 @@ class SMALabellerApp:
                 scaler.update()
                 self.scheduler.step()
                 self.model.zero_grad()
+    
 
     def do2dTraining(self):
         scaler = torch.cuda.amp.GradScaler()
@@ -243,17 +299,11 @@ class SMALabellerApp:
             training_loss = 0.0
             for batch_idx, batch_data in enumerate(self.train_loader):
                                 
-                # Use autocast for mixed precision training
-                with torch.cuda.amp.autocast():
-                    #loss = self.compute2dBatchLoss(batch_idx, batch_data, self.batch_size)
-                    loss, elapsed, peak_mem = benchmark_loss_step(self.compute2dBatchLoss, batch_idx, batch_data, self.batch_size)
 
-                
+                loss, elapsed, peak_mem = benchmark_loss_step(self.compute2dBatchLoss, batch_idx, batch_data, self.batch_size)
                 # Log the loss
-                if batch_idx % 10 == 0:
-                    #print("Epoch {} Batch {} Loss: {:.4f}".format(epoch, batch_idx, loss.item()))
-                    print(f"[Epoch {epoch} | Batch {batch_idx}] Loss: {loss.item():.4f} | Time: {elapsed:.3f}s | Peak Mem: {peak_mem:.2f} MB")
-                    self.logMetrics(epoch, batch_idx, loss)
+                print(f"[Epoch {epoch} | Batch {batch_idx}] Loss: {loss.item():.4f} | Time: {elapsed:.3f}s | Peak Mem: {peak_mem:.2f} MB")
+                self.logMetrics(epoch, batch_idx, loss)
                 scaler.scale(loss).backward()
                 scaler.step(self.optimizer)
                 scaler.update()
@@ -264,26 +314,39 @@ class SMALabellerApp:
             avg_training_loss = training_loss / len(self.train_loader)
             print(f"Epoch {epoch} Average Training Loss: {avg_training_loss:.4f}")
             
-            
+            # ------------------
+            # BN CALIBRATION
+            # ------------------
+            self.reset_bn_running_stats()  # (do this each epoch, right before validation)
+            self.calibrate_bn(forward_fn=lambda b: forward_slices_only(self.model, b, self.device, slice_batch=16),  # tune slice_batch if needed
+                warmup_batches=8,  # 4-16 is typical
+            )
+
             # Validation step
+            
             self.model.eval()
+            for m in self.model.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.track_running_stats = False
+                    m.running_mean = None
+                    m.running_var = None
             val_loss = 0.0
             with torch.no_grad():
                 for batch_idx, batch_data in enumerate(self.val_loader):
-                    # Use autocast for mixed precision validation
-                    with torch.cuda.amp.autocast():
-                        loss = self.compute2dBatchLoss(batch_idx, batch_data, self.batch_size)
+
+                    loss = self.compute2dBatchLoss(batch_idx, batch_data, self.batch_size)
                     
                     # Log the validation loss
-                    if batch_idx % 10 == 0:
-                        print("Validation - Epoch {} Batch {} Loss: {:.4f}".format(
-                            epoch, batch_idx, loss.item()))
-                        if self.val_writer is not None:
-                            self.val_writer.add_scalar('loss', loss.item(), epoch * len(self.val_loader) + batch_idx)
-                            self.val_writer.flush()
+                    
+                    print("Validation - Epoch {} Batch {} Loss: {:.4f}".format(
+                        epoch, batch_idx, loss.item()))
+                    if self.val_writer is not None:
+                        self.val_writer.add_scalar('loss', loss.item(), epoch * len(self.val_loader) + batch_idx)
+                        self.val_writer.flush()
                     val_loss += loss.item()
             avg_val_loss = val_loss / len(self.val_loader)
             print(f"Epoch {epoch} Average Validation Loss: {avg_val_loss:.4f}")
+
                         
             
     def main(self):

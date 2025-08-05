@@ -23,7 +23,7 @@ import pdb
 device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 home_dir = os.path.expanduser('~')
 #loss_fn = DiceLoss(sigmoid=True,reduction="mean",include_background=True)
-loss_fn = DiceCELoss(sigmoid=True, reduction="mean", include_background=True)
+loss_fn = DiceCELoss(sigmoid=True, to_onehot_y=False,reduction="mean", include_background=False,smooth_nr=1e-5,smooth_dr=1e-5)
 
 def center_crop_3d(in_tensor, target_size):
     _, _, h, w, d = in_tensor.size()
@@ -56,14 +56,21 @@ def pad_to_match_2d(output, reference):
     return F.pad(output, [diffX // 2, diffX - diffX // 2,
                           diffY // 2, diffY - diffY // 2])
 
+def make_norm(out_channels):
+    # pick the largest divisor of out_channels up to 32 (falls back to 1)
+    for g in (32, 16, 8, 4, 2, 1):
+        if out_channels % g == 0:
+            return nn.GroupNorm(g, out_channels,eps=1e-5, affine=True)
+    return nn.GroupNorm(1, out_channels,eps=1e-5, affine=True)  # safety (LayerNorm-like)
+
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1,bias=False),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1,bias=False),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(inplace=True)
         )
