@@ -4,6 +4,7 @@ from ray import tune
 from ray import train
 from ray.train import Checkpoint, get_checkpoint
 from ray.tune.schedulers import ASHAScheduler
+from ray.tune.search.optuna import OptunaSearch
 import ray.cloudpickle as pickle
 
 import torch
@@ -12,10 +13,11 @@ from torch.utils.data import random_split
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn as nn
 
-from model import UNet3D, Custom3DMRIImageDataset, Custom3DMRIDatasetMONAI, DiceLoss,UNet2D, MONAIDiceLoss
+from model import UNet3D, Custom3DMRIImageDataset, Custom3DMRIDatasetMONAI, UNet2D, MONAIDiceLoss,torch_BCEWithLogitsLoss,MONAIDiceCELoss
 from utils import enumerateWithEstimate,benchmark_loss_step
+
 import logging
-import argparse
+
 import datetime
 import sys
 import os
@@ -35,7 +37,6 @@ log.setLevel(logging.DEBUG)
 
 home_dir = os.path.expanduser('~')
 
-
 def forward_slices_only(model, batch, device, slice_batch: int = 16):
     # unpack
     if isinstance(batch, dict):
@@ -53,11 +54,10 @@ def forward_slices_only(model, batch, device, slice_batch: int = 16):
     for s in range(0, N, slice_batch):
         e = min(s + slice_batch, N)
         _ = model(x[s:e])  # forward only
-    
-
 
 class SMALabellerApp:
-    def __init__(self):
+    def __init__(self,args=None):
+        import argparse
 
         parser = argparse.ArgumentParser(description='')
         parser.add_argument('--unet_dimensions',
@@ -103,7 +103,15 @@ class SMALabellerApp:
                             default='cconelea',
                             )
         # parse arguments
-        cli_args = parser.parse_args()
+        
+        if isinstance(args, dict): # if dictionary, convert to CLI args
+            cli_args = parser.parse_args(self._dict_to_cli(args))
+        elif isinstance(args, list):
+            cli_args = parser.parse_args(args)
+        else:
+            cli_args, _ = parser.parse_known_args()
+
+        # set attributes from CLI args
         self.unet_dimensions = cli_args.unet_dimensions
         self.num_workers = cli_args.num_workers
         self.batch_size = cli_args.batch_size
@@ -119,24 +127,18 @@ class SMALabellerApp:
         self.trn_writer = None
         self.val_writer = None
 
-
         self.device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 
-        self.data_dicts = self.build_data_dicts()
-
-        train_files, val_files = train_test_split(self.data_dicts, test_size=self.val_set_size, random_state=42)
-
-        self.train_loader = MONAIDataLoader(Custom3DMRIDatasetMONAI(train_files),
-            batch_size=self.batch_size,shuffle=True,num_workers=self.num_workers,
-            pin_memory=True,collate_fn=pad_list_data_collate)
-
-        self.val_loader = MONAIDataLoader(Custom3DMRIDatasetMONAI(val_files),
-            batch_size=self.batch_size,shuffle=False,num_workers=self.num_workers,
-            pin_memory=True,collate_fn=pad_list_data_collate)
-        log.info("Total training samples: {}".format(len(self.train_loader)))
-        log.info("Total validation samples: {}".format(len(self.val_loader)))
-
-        self.dice_loss = DiceLoss()
+    def _dict_to_cli(self, arg_dict):
+        """Convert dict to CLI-style args: {'batch_size': 4}  ['--batch_size', '4']"""
+        cli_args = []
+        for k, v in arg_dict.items():
+            if isinstance(v, bool):
+                if v:
+                    cli_args.append(f"--{k}")
+            else:
+                cli_args.extend([f"--{k}", str(v)])
+        return cli_args
 
     def build_data_dicts(self):
         label_paths = sorted(glob(os.path.join(self.training_labels, '*.nii.gz')))
@@ -187,14 +189,21 @@ class SMALabellerApp:
         log.info("Using '{}".format(self.device))
         return model
 
-
-    def initOptimizer(self):
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-2,
+    def initOptimizer(self,config):
+        """
+        Initialize the optimizer and learning rate scheduler.
+        Returns:
+            optimizer: The optimizer instance.
+            scheduler: The learning rate scheduler instance.
+        """
+        lr = float(config["lr"])
+        max_lr = float(config["max_lr"])
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr,
                                                         epochs=self.epochs,steps_per_epoch=len(self.train_loader))
         return optimizer,scheduler
 
-    def compute2dBatchLoss(self,batch_idx,batch,batch_size):
+    def compute2dBatchLoss(self,batch_idx,batch,batch_size,config):
         if isinstance(batch, dict):
             # MONAI DataLoader returns a dict
             input_t = batch['image']
@@ -221,10 +230,13 @@ class SMALabellerApp:
             print(f"[NaN Warning] NaNs in label at batch {batch_idx}")
 
         # Compute loss
-        
-        #loss = self.dice_loss(output_g, label_slices)
         with torch.cuda.amp.autocast(enabled=False): # Loss in FP32
-            loss = MONAIDiceLoss(output_g.float(),label_slices.float())
+            if config['loss_function'] == 'dice':
+                loss = MONAIDiceLoss(output_g.float(),label_slices.float())
+            elif config['loss_function'] == 'cross_entropy':
+                loss = torch_BCEWithLogitsLoss(output_g.float(),label_slices.float())
+            elif config['loss_function'] == 'combination':
+                loss = MONAIDiceCELoss(output_g.float(),label_slices.float())
 
         return loss # return loss for entire batch
     
@@ -285,7 +297,29 @@ class SMALabellerApp:
                 self.model.zero_grad()
     
 
-    def do2dTraining(self):
+    def do2dTraining(self,config,ray_tune=False):
+
+        self.data_dicts = self.build_data_dicts()
+        
+        train_files, val_files = train_test_split(self.data_dicts, test_size=self.val_set_size, random_state=42)
+
+        self.train_loader = MONAIDataLoader(Custom3DMRIDatasetMONAI(train_files,augmentations=config['augmentations']),
+            batch_size=self.batch_size,shuffle=True,num_workers=self.num_workers,
+            pin_memory=True,collate_fn=pad_list_data_collate)
+
+        self.val_loader = MONAIDataLoader(Custom3DMRIDatasetMONAI(val_files,augmentations=config['augmentations']),
+            batch_size=self.batch_size,shuffle=False,num_workers=self.num_workers,
+            pin_memory=True,collate_fn=pad_list_data_collate)
+
+
+        self.model = self.init2dModel()
+        self.optimizer, self.scheduler = self.initOptimizer(config)
+        self.initTensorboardWriters()
+
+        
+        log.info("Total training samples: {}".format(len(self.train_loader)))
+        log.info("Total validation samples: {}".format(len(self.val_loader)))
+
         scaler = torch.cuda.amp.GradScaler()
         self.model.zero_grad()
         self.model.train()
@@ -300,7 +334,7 @@ class SMALabellerApp:
             for batch_idx, batch_data in enumerate(self.train_loader):
                                 
 
-                loss, elapsed, peak_mem = benchmark_loss_step(self.compute2dBatchLoss, batch_idx, batch_data, self.batch_size)
+                loss, elapsed, peak_mem = benchmark_loss_step(self.compute2dBatchLoss, batch_idx, batch_data, self.batch_size,config)
                 # Log the loss
                 print(f"[Epoch {epoch} | Batch {batch_idx}] Loss: {loss.item():.4f} | Time: {elapsed:.3f}s | Peak Mem: {peak_mem:.2f} MB")
                 self.logMetrics(epoch, batch_idx, loss)
@@ -334,7 +368,7 @@ class SMALabellerApp:
             with torch.no_grad():
                 for batch_idx, batch_data in enumerate(self.val_loader):
 
-                    loss = self.compute2dBatchLoss(batch_idx, batch_data, self.batch_size)
+                    loss = self.compute2dBatchLoss(batch_idx, batch_data, self.batch_size,config)
                     
                     # Log the validation loss
                     
@@ -346,22 +380,30 @@ class SMALabellerApp:
                     val_loss += loss.item()
             avg_val_loss = val_loss / len(self.val_loader)
             print(f"Epoch {epoch} Average Validation Loss: {avg_val_loss:.4f}")
+            if ray_tune:
+                tune.report(training_loss=avg_training_loss,validation_loss=avg_val_loss, epoch=epoch)
 
-                        
-            
+                 
     def main(self):
         log.info("Starting SMALabellerApp with unet_dimensions: {}".format(self.unet_dimensions))
         if self.unet_dimensions == '2D':
-            self.model = self.init2dModel()
-            self.optimizer, self.scheduler = self.initOptimizer()
-            self.initTensorboardWriters()
-            self.do2dTraining()
+            
+            config = {
+                "lr": 1e-3,
+                "max_lr": 1e-2,
+                "loss_function": 'combination',
+                "augmentations": True,
+                "dropout_rate": 0
+            }
+            self.do2dTraining(config)
+            
+        """
         elif self.unet_dimensions == '3D':
             self.model = self.init3dModel()
             self.optimizer, self.scheduler = self.initOptimizer()
             self.initTensorboardWriters()
             self.do3dTraining()
-
+        """
 SMALabellerApp().main()
 
 

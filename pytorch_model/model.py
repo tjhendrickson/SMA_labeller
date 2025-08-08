@@ -6,7 +6,7 @@ import nibabel as nib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import BatchNorm3d,BatchNorm2d
+from torch.nn import BatchNorm3d,BatchNorm2d,Dropout2d,BCEWithLogitsLoss
 from torch.nn.functional import leaky_relu
 from torch.utils.data import Dataset
 
@@ -22,8 +22,9 @@ import pdb
 
 device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 home_dir = os.path.expanduser('~')
-#loss_fn = DiceLoss(sigmoid=True,reduction="mean",include_background=True)
-loss_fn = DiceCELoss(sigmoid=True, to_onehot_y=False,reduction="mean", include_background=False,smooth_nr=1e-5,smooth_dr=1e-5)
+BCEWithLogitsLoss_fn = BCEWithLogitsLoss(reduction='mean')
+Dice_loss_fn = DiceLoss(sigmoid=True, to_onehot_y=False,reduction="mean", include_background=False,smooth_nr=1e-5,smooth_dr=1e-5)
+Dice_CE_loss_fn = DiceCELoss(sigmoid=True, to_onehot_y=False,reduction="mean", include_background=False,smooth_nr=1e-5,smooth_dr=1e-5)
 
 def center_crop_3d(in_tensor, target_size):
     _, _, h, w, d = in_tensor.size()
@@ -63,7 +64,24 @@ def make_norm(out_channels):
             return nn.GroupNorm(g, out_channels,eps=1e-5, affine=True)
     return nn.GroupNorm(1, out_channels,eps=1e-5, affine=True)  # safety (LayerNorm-like)
 
-class DoubleConv(nn.Module):
+class encode_DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels,dropout):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1,bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(inplace=True),
+            nn.Dropout2d(p=dropout),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1,bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(inplace=True),
+            nn.Dropout2d(p=dropout)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+class decode_DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.double_conv = nn.Sequential(
@@ -72,40 +90,23 @@ class DoubleConv(nn.Module):
             nn.LeakyReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1,bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(inplace=True)
+            nn.LeakyReLU(inplace=True),
         )
 
     def forward(self, x):
         return self.double_conv(x)
 
 def MONAIDiceLoss(inputs, targets):
-    loss = loss_fn(inputs, targets)
+    loss = Dice_loss_fn(inputs, targets)
     return loss
 
-class DiceLoss(nn.Module):
-    def __init__(self, smooth=1.):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-        self.bce = nn.BCEWithLogitsLoss(reduction='mean')  # expects raw logits
+def MONAIDiceCELoss(inputs, targets):
+    loss = Dice_CE_loss_fn(inputs, targets)
+    return loss
 
-    def forward(self, inputs, targets):
-
-        # compute binary cross-entropy loss from logits
-        bce_loss = self.bce(inputs, targets.float())
-        
-        # Apply sigmoid since inputs are logits
-        inputs = torch.sigmoid(inputs)       
-
-        # Flatten
-        inputs = inputs.contiguous().view(-1)
-        targets = targets.contiguous().view(-1)
-
-        intersection = (inputs * targets).sum()
-        dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
-
-        dice_loss = 1 - dice  # Dice loss is 1 - Dice coefficient
-
-        return dice_loss + bce_loss  # Combine BCE and Dice loss
+def torch_BCEWithLogitsLoss(inputs, targets):
+    loss = BCEWithLogitsLoss_fn(inputs, targets)
+    return loss
 
 class Custom3DMRIDatasetMONAI:
     def __init__(
@@ -235,26 +236,26 @@ class Custom3DMRIImageDataset(Dataset):
 
 
 class UNet2D(nn.Module):
-    def __init__(self, n_class):
+    def __init__(self, n_class,dropout=0.0):
         super().__init__()
-        self.enc1 = DoubleConv(1, 64)
+        self.enc1 = encode_DoubleConv(1, 64,dropout)
         self.pool1 = nn.MaxPool2d(2)
-        self.enc2 = DoubleConv(64, 128)
+        self.enc2 = encode_DoubleConv(64, 128,dropout)
         self.pool2 = nn.MaxPool2d(2)
-        self.enc3 = DoubleConv(128, 256)
+        self.enc3 = encode_DoubleConv(128, 256,dropout)
         self.pool3 = nn.MaxPool2d(2)
-        self.enc4 = DoubleConv(256, 512)
+        self.enc4 = encode_DoubleConv(256, 512,dropout)
         self.pool4 = nn.MaxPool2d(2)
-        self.bottleneck = DoubleConv(512, 1024)
+        self.bottleneck = encode_DoubleConv(512, 1024,dropout)
 
         self.upconv1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.dec1 = DoubleConv(1024, 512)
+        self.dec1 = decode_DoubleConv(1024, 512)
         self.upconv2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.dec2 = DoubleConv(512, 256)
+        self.dec2 = decode_DoubleConv(512, 256)
         self.upconv3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec3 = DoubleConv(256, 128)
+        self.dec3 = decode_DoubleConv(256, 128)
         self.upconv4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec4 = DoubleConv(128, 64)
+        self.dec4 = decode_DoubleConv(128, 64)
 
         self.outconv = nn.Conv2d(64, n_class, kernel_size=1)
 
