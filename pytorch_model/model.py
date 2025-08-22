@@ -12,7 +12,9 @@ from torch.utils.data import Dataset
 
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Spacingd, Orientationd, ScaleIntensityd,
-    RandFlipd, RandAffined, RandGaussianNoised, RandCropByPosNegLabeld, CastToTyped)
+    RandFlipd, RandAffined, RandGaussianNoised, RandCropByPosNegLabeld, CastToTyped,
+    Rand3DElasticd, RandRotate90d, RandBiasFieldd, RandScaleIntensityd,
+    RandShiftIntensityd, RandAdjustContrastd, RandHistogramShiftd, MapTransform)
 from monai.data import CacheDataset
 from monai.losses import DiceLoss, DiceCELoss
 
@@ -20,7 +22,6 @@ import diskcache as dc
 
 import pdb
 
-device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 home_dir = os.path.expanduser('~')
 BCEWithLogitsLoss_fn = BCEWithLogitsLoss(reduction='mean')
 Dice_loss_fn = DiceLoss(sigmoid=True, to_onehot_y=False,reduction="mean", include_background=False,smooth_nr=1e-5,smooth_dr=1e-5)
@@ -64,6 +65,18 @@ def make_norm(out_channels):
             return nn.GroupNorm(g, out_channels,eps=1e-5, affine=True)
     return nn.GroupNorm(1, out_channels,eps=1e-5, affine=True)  # safety (LayerNorm-like)
 
+def MONAIDiceLoss(inputs, targets):
+    loss = Dice_loss_fn(inputs, targets)
+    return loss
+
+def MONAIDiceCELoss(inputs, targets):
+    loss = Dice_CE_loss_fn(inputs, targets)
+    return loss
+
+def torch_BCEWithLogitsLoss(inputs, targets):
+    loss = BCEWithLogitsLoss_fn(inputs, targets)
+    return loss
+
 class encode_DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels,dropout):
         super().__init__()
@@ -96,17 +109,92 @@ class decode_DoubleConv(nn.Module):
     def forward(self, x):
         return self.double_conv(x)
 
-def MONAIDiceLoss(inputs, targets):
-    loss = Dice_loss_fn(inputs, targets)
-    return loss
+class EarlyStopping:
+    """
+    Early stopping utility.
+    - mode: 'min' for loss (lower is better), 'max' for metrics (higher is better)
+    - patience: epochs to wait with no improvement
+    - min_delta: minimum change to qualify as an improvement
+    - restore_best: whether to reload best weights when stopping
+    """
+    def __init__(self, patience=15, min_delta=0.0, mode='min', restore_best=True, ckpt_dir=None):
+        assert mode in ('min', 'max')
+        self.patience = int(patience)
+        self.min_delta = float(min_delta)
+        self.mode = mode
+        self.restore_best = restore_best
+        self.ckpt_dir = ckpt_dir
 
-def MONAIDiceCELoss(inputs, targets):
-    loss = Dice_CE_loss_fn(inputs, targets)
-    return loss
+        self.best = None
+        self.best_epoch = -1
+        self.num_bad_epochs = 0
+        self.should_stop = False
+        self.best_ckpt_path = None
 
-def torch_BCEWithLogitsLoss(inputs, targets):
-    loss = BCEWithLogitsLoss_fn(inputs, targets)
-    return loss
+    def _is_better(self, current, best):
+        if self.mode == 'min':
+            return (best - current) > self.min_delta
+        else:
+            return (current - best) > self.min_delta
+
+    def step(self, value, model, optimizer, epoch):
+        """
+        Returns True if we should stop after this epoch.
+        Also saves a checkpoint when a new best is found.
+        """
+        if self.best is None:
+            self.best = value
+            self.best_epoch = epoch
+            self._save_ckpt(model, optimizer, epoch, value)
+            self.num_bad_epochs = 0
+            return False
+
+        if self._is_better(value, self.best):
+            self.best = value
+            self.best_epoch = epoch
+            self.num_bad_epochs = 0
+            self._save_ckpt(model, optimizer, epoch, value)
+        else:
+            self.num_bad_epochs += 1
+            if self.num_bad_epochs >= self.patience:
+                self.should_stop = True
+        return self.should_stop
+
+    def _save_ckpt(self, model, optimizer, epoch, value):
+        if self.ckpt_dir is None:
+            return
+        os.makedirs(self.ckpt_dir, exist_ok=True)
+        # keep only the latest best
+        self.best_ckpt_path = os.path.join(self.ckpt_dir, "best.pt")
+        torch.save({
+            "epoch": epoch,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "monitored_value": value,
+            "mode": self.mode,
+        }, self.best_ckpt_path)
+
+    def restore(self, model, optimizer=None):
+        if not self.restore_best:
+            return None
+        if self.best_ckpt_path and os.path.exists(self.best_ckpt_path):
+            ckpt = torch.load(self.best_ckpt_path, map_location="cpu")
+            model.load_state_dict(ckpt["model_state"])
+            if optimizer is not None and "optimizer_state" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state"])
+            return ckpt
+        return None
+
+class AssertFiniteD(MapTransform):
+    def __call__(self, data):
+        d = dict(data)
+        for k in self.keys:
+            x = d[k]
+            if hasattr(x, "array"): x = x.array  # MetaTensor
+            if not np.isfinite(np.asarray(x)).all():
+                raise RuntimeError(f"Non-finite values in '{k}'")
+        return d
+
 
 class Custom3DMRIDatasetMONAI:
     def __init__(
@@ -139,28 +227,57 @@ class Custom3DMRIDatasetMONAI:
             Orientationd(keys=["image", "label"], axcodes="RAS"),
             Spacingd(keys=["image", "label"], pixdim=self.pixdim, mode=["bilinear", "nearest"]),
             ScaleIntensityd(keys="image"),
-            CastToTyped(keys=["label"], dtype=np.float32)
+            CastToTyped(keys=["label"], dtype=np.float32),
+            AssertFiniteD(keys=["image","label"]),
         ]
         if self.augmentations:
             base_transforms += self._add_augmentations()
         return Compose(base_transforms)
     
     def _add_augmentations(self):
-        augmentations = [
-            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
-            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
-            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
-            RandAffined(keys=["image", "label"], mode=["bilinear","nearest"], prob=0.5, rotate_range=(np.pi/18, np.pi/18, np.pi/18), scale_range=(0.1, 0.1, 0.1)),
-            RandGaussianNoised(keys="image", prob=0.5, mean=0.0, std=0.1),
-            RandCropByPosNegLabeld(
+
+        patches = RandCropByPosNegLabeld(
                 keys=["image", "label"],
                 label_key="label",
-                spatial_size=(128, 128, 128),
+                spatial_size=(128, 128, 64),
                 pos=1,
                 neg=1,
-                num_samples=1,
+                num_samples=3,
                 image_key="image"
-            )]
+            )
+        
+        # spatial augmentations
+        spatial = [
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=["image", "label"], prob=0.2, spatial_axis=2),
+            RandAffined(keys=["image", "label"], mode=["bilinear","nearest"], 
+                prob=0.7, rotate_range=(np.pi/18, np.pi/18, np.pi/36), #~10, 10, 5 degrees
+                scale_range=(0.1, 0.1, 0.05),
+                shear_range=(0.1, 0.1, 0.05),
+                padding_mode="border"),
+            Rand3DElasticd(
+                keys=["image","label"], prob=0.15,
+                sigma_range=(5, 8), magnitude_range=(30, 60),
+                mode=("bilinear","nearest"),
+                padding_mode="border"),
+            
+            # right-angle rotation in-plane when spacing is anisotropic
+            RandRotate90d(keys=["image","label"], prob=0.2, max_k=1, spatial_axes=(0,1)),
+            ]
+        
+        # intensity augmentations, images only
+        intensity = [
+            RandBiasFieldd(keys="image", prob=0.25, coeff_range=(0.0, 0.7)),
+            RandScaleIntensityd(keys="image", factors=0.1, prob=0.9),   # ±10%
+            RandShiftIntensityd(keys="image", offsets=0.1, prob=0.9),   # ±0.1
+            RandAdjustContrastd(keys="image", prob=0.3, gamma=(0.7, 1.5)),
+            RandHistogramShiftd(keys="image", prob=0.2, num_control_points=(3, 5)),
+            RandGaussianNoised(keys="image", prob=0.2, mean=0.0, std=0.01),  # lower std
+        ]
+
+        # Combine all augmentations
+        augmentations = [patches] + spatial + intensity
 
         return augmentations
 
@@ -331,52 +448,52 @@ class UNet3D(nn.Module):
     def forward(self,x):
 
         # Encoder
-        BN_encode1layer1 = BatchNorm3d(self.encode1layer1.out_channels).to(device)
+        BN_encode1layer1 = BatchNorm3d(self.encode1layer1.out_channels)
         forward_encode1layer1= leaky_relu(BN_encode1layer1(self.encode1layer1(x)))
-        BN_encode1layer2 = BatchNorm3d(self.encode1layer2.out_channels).to(device)
+        BN_encode1layer2 = BatchNorm3d(self.encode1layer2.out_channels)
         forward_encode1layer2 = leaky_relu(BN_encode1layer2(self.encode1layer2(forward_encode1layer1)))
         forward_pool1 = self.pool1(forward_encode1layer2)
 
-        BN_encode2layer1 = BatchNorm3d(self.encode2layer1.out_channels).to(device)
+        BN_encode2layer1 = BatchNorm3d(self.encode2layer1.out_channels)
         forward_encode2layer1 = leaky_relu(BN_encode2layer1(self.encode2layer1(forward_pool1)))
-        BN_encode2layer2 = BatchNorm3d(self.encode2layer2.out_channels).to(device)
+        BN_encode2layer2 = BatchNorm3d(self.encode2layer2.out_channels)
         forward_encode2layer2 = leaky_relu(BN_encode2layer2(self.encode2layer2(forward_encode2layer1)))
         forward_pool2=self.pool2(forward_encode2layer2)
 
-        BN_encode3layer1 = BatchNorm3d(self.encode3layer1.out_channels).to(device)
+        BN_encode3layer1 = BatchNorm3d(self.encode3layer1.out_channels)
         forward_encode3layer1 = leaky_relu(BN_encode3layer1(self.encode3layer1(forward_pool2)))
-        BN_encode3layer2 = BatchNorm3d(self.encode3layer2.out_channels).to(device)
+        BN_encode3layer2 = BatchNorm3d(self.encode3layer2.out_channels)
         forward_encode3layer2 = leaky_relu(BN_encode3layer2(self.encode3layer2(forward_encode3layer1)))
         forward_pool3=self.pool3(forward_encode3layer2)
 
-        BN_encode4layer1 = BatchNorm3d(self.encode4layer1.out_channels).to(device)
+        BN_encode4layer1 = BatchNorm3d(self.encode4layer1.out_channels)
         forward_encode4layer1 = leaky_relu(BN_encode4layer1(self.encode4layer1(forward_pool3)))
-        BN_encode4layer2 = BatchNorm3d(self.encode4layer2.out_channels).to(device)
+        BN_encode4layer2 = BatchNorm3d(self.encode4layer2.out_channels)
         forward_encode4layer2 = leaky_relu(BN_encode4layer2(self.encode4layer2(forward_encode4layer1)))
 
         # Decoder
         forward_upconv1=self.upconv1(forward_encode4layer2)
         forward_encode3layer2_cropped = center_crop_3d(forward_encode3layer2, forward_upconv1)
         skipconnection1=torch.cat([forward_upconv1,forward_encode3layer2_cropped],dim=1)
-        BN_decode1layer1 = BatchNorm3d(self.decode1layer1.out_channels).to(device)
+        BN_decode1layer1 = BatchNorm3d(self.decode1layer1.out_channels)
         forward_decode1layer1=leaky_relu(BN_decode1layer1(self.decode1layer1(skipconnection1)))
-        BN_decode1layer2=BatchNorm3d(self.decode1layer2.out_channels).to(device)
+        BN_decode1layer2=BatchNorm3d(self.decode1layer2.out_channels)
         forward_decode1layer2 = leaky_relu(BN_decode1layer2(self.decode1layer2(forward_decode1layer1)))
 
         forward_upconv2=self.upconv2(forward_decode1layer2)
         forward_encode2layer2_cropped = center_crop_3d(forward_encode2layer2, forward_upconv2)
         skipconnection2=torch.cat([forward_upconv2,forward_encode2layer2_cropped],dim=1)
-        BN_decode2layer1 = BatchNorm3d(self.decode2layer1.out_channels).to(device)
+        BN_decode2layer1 = BatchNorm3d(self.decode2layer1.out_channels)
         forward_decode2layer1=leaky_relu(BN_decode2layer1(self.decode2layer1(skipconnection2)))
-        BN_decode2layer2 = BatchNorm3d(self.decode2layer2.out_channels).to(device)
+        BN_decode2layer2 = BatchNorm3d(self.decode2layer2.out_channels)
         forward_decode2layer2 = leaky_relu(BN_decode2layer2(self.decode2layer2(forward_decode2layer1)))
 
         forward_upconv3=self.upconv3(forward_decode2layer2)
         forward_encode1layer2_cropped = center_crop_3d(forward_encode1layer2, forward_upconv3)
         skipconnection3=torch.cat([forward_upconv3,forward_encode1layer2_cropped],dim=1)
-        BN_decode3layer1 = BatchNorm3d(self.decode3layer1.out_channels).to(device)
+        BN_decode3layer1 = BatchNorm3d(self.decode3layer1.out_channels)
         forward_decode3layer1=leaky_relu(BN_decode3layer1(self.decode3layer1(skipconnection3)))
-        BN_decode3layer2 = BatchNorm3d(self.decode3layer2.out_channels).to(device)
+        BN_decode3layer2 = BatchNorm3d(self.decode3layer2.out_channels)
         forward_decode3layer2 = leaky_relu(BN_decode3layer2(self.decode3layer2(forward_decode3layer1)))
 
         # output layer

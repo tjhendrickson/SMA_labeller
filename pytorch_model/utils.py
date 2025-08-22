@@ -16,8 +16,6 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
-
-
 def benchmark_loss_step(compute_fn, *args, **kwargs):
     torch.cuda.reset_peak_memory_stats()
     start_time = time.time()
