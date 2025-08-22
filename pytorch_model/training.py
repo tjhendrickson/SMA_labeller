@@ -8,8 +8,8 @@ from torch.utils.data import random_split
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn as nn
 
-from model import UNet3D, Custom3DMRIImageDataset, Custom3DMRIDatasetMONAI, UNet2D, MONAIDiceLoss,torch_BCEWithLogitsLoss,MONAIDiceCELoss,EarlyStopping
-from utils import enumerateWithEstimate,benchmark_loss_step
+from model.model import UNet3D, Custom3DMRIImageDataset, Custom3DMRIDatasetMONAI, UNet2D, MONAIDiceLoss,torch_BCEWithLogitsLoss,MONAIDiceCELoss,EarlyStopping
+from utils.utils import enumerateWithEstimate,benchmark_loss_step
 
 import logging
 
