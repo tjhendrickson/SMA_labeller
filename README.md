@@ -387,8 +387,11 @@ results = tuner.fit()
 ---
 
 ## License
+This repository is distributed under the [Apache License 2.0](LICENSE).
 
-Add a `LICENSE` file. Example: [MIT License](https://opensource.org/license/mit/).
+See the [LICENSE](LICENSE) file for details.
+
+
 
 ---
 
