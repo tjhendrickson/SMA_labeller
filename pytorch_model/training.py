@@ -33,6 +33,15 @@ log.setLevel(logging.DEBUG)
 home_dir = os.path.expanduser('~')
 
 def forward_slices_only(model, batch, device, slice_batch: int = 16):
+    """ Forward pass through the model using slices of the input batch.
+    This function reshapes the input tensor to process slices in a micro-batch manner,
+    which helps in avoiding out-of-memory (OOM) errors during calibration.
+    Args:
+        model (torch.nn.Module): The model to run the forward pass.
+        batch (tuple or dict): Input batch containing the image tensor.
+        device (torch.device): The device to run the model on (CPU or GPU).
+        slice_batch (int): Number of slices to process in each micro-batch.
+    """
     # unpack
     if isinstance(batch, dict):
         x = batch['image'].as_tensor().to(device, non_blocking=True)
